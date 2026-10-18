@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets (only the placeholder example is committed)
+.env
+.env.*
+!.env.example
+
+# Local runtime data: job scratch folders, logs, rate-limit counters
+scratch/
+*.log
+*.sqlite3
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Agent build notes
+.superpowers/
+
+# Local-only design docs
+docs/

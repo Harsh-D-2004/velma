@@ -1,0 +1,17 @@
+services:
+  velma:
+    build: .
+    env_file: .env
+    environment:                    # wins over env_file: undo the host-only paths in .env
+      VELMA_SCRATCH_DIR: /scratch
+    ports:
+      - "127.0.0.1:8000:8000"      # private only (no auth)
+    pids_limit: 512                 # process cap for the whole container, incl. the bash sandbox
+    init: true                      # proper PID 1: forwards SIGTERM, reaps zombies
+    stop_grace_period: 30s          # time for jobs to save context and release
+    security_opt:
+      - seccomp=unconfined          # bubblewrap needs user namespaces
+      - apparmor=unconfined
+    tmpfs:
+      - /scratch:size=2g,uid=1000,gid=1000,mode=0700   # owned by the image's `velma` user, else root's and jobs can't write
+    restart: unless-stopped

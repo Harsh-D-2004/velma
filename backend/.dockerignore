@@ -1,0 +1,4 @@
+.venv/
+.env
+scratch/
+velma.egg-info/
