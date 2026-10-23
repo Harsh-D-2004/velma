@@ -1,16 +1,20 @@
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 
+from app.core.settings import settings
 from app.helpers import diagrams
+from app.helpers.lines import body_of
 from app.models.agent import Tool
 from app.services import storage
 from app.services.agent.tools.content import DIAGRAM_KINDS, _section
+from app.services.page.render import shows_original
 from app.services.llm import text
 
 DRAW_PROMPT = (Path(__file__).parent.parent / "prompts" / "draw.md").read_text()
-RENDER_TRIES = 3
+log = logging.getLogger("velma.draw")
 
 
 def _strip_fence(s: str) -> str:
@@ -18,9 +22,9 @@ def _strip_fence(s: str) -> str:
 
 
 def section_text(ws: dict, sid: str, s: dict) -> tuple[str, str]:
-    """(the section's current rewrite, the section's glossary definitions)."""
+    """(the text the page shows for the section, its glossary definitions)."""
     gl = [f"{g['term']}: {g['definition']}" for g in ws["glossary"].values() if g["section"] == sid]
-    return s["rewritten"], "\n".join(gl)
+    return body_of(s) if shows_original(s) or "rewritten" not in s else s["rewritten"], "\n".join(gl)
 
 
 def _table_errors(t) -> list[str]:
@@ -44,7 +48,8 @@ def draw(args: dict, tctx) -> dict:
     if kind not in DIAGRAM_KINDS:
         return {"ok": False, "error": f"kind must be one of {DIAGRAM_KINDS}"}
     chk = s.get("check")
-    if not (chk and chk.get("passed") and chk.get("rev") == _rev(s)):
+    orig = shows_original(s)  # rewrite:false or fallback section: draw from the original text
+    if not orig and not (chk and chk.get("passed") and chk.get("rev") == _rev(s)):
         return {"ok": False, "error": "draw needs a rewrite whose current text passed check; rewrite and check first"}
     idea = str(args.get("idea") or (s["diagram"] or {}).get("idea") or s["title"])[:200]
     rw, glossary = section_text(ws, sid, s)
@@ -66,14 +71,18 @@ def draw(args: dict, tctx) -> dict:
         if not errs:
             break
         fails += 1
-        if fails >= RENDER_TRIES:
+        log.warning("draw section=%s kind=%s try=%d problems=%s", sid, kind, fails, "; ".join(errs[:2])[:200])
+        if fails >= settings.diagram_render_tries:
+            s["diagram_failed"] = True  # finish stops waiting for this section's diagram
             return {"ok": False, "error": "could not draw a valid diagram; skip it or try another kind", "problems": errs[:5]}
         msgs += [{"role": "assistant", "content": shown if isinstance(shown, str) else json.dumps(shown)},
                  {"role": "user", "content": "Fix these problems and reply again:\n- " + "\n- ".join(errs[:8])}]
     # same section + kind: replace the earlier diagram, so a second call is safe
     did = next((k for k, v in ws["diagrams"].items() if v["section"] == sid and v["type"] == kind),
                f"d{len(ws['diagrams']) + 1}")
-    d = {"section": sid, "type": kind, "alt": f"Diagram: {idea}", "rev": chk["rev"]}
+    d = {"section": sid, "type": kind, "alt": f"Diagram: {idea}", "rev": "original" if orig else chk["rev"]}
+    s.pop("diagram_failed", None)
+    log.info("draw section=%s kind=%s id=%s source=%s tries=%d", sid, kind, did, "original" if orig else "rewrite", fails + 1)
     if kind == "compare":
         d |= {"kind": "table", "columns": [str(c) for c in out["columns"]],
               "rows": [[str(c) for c in r] for r in out["rows"]]}

@@ -7,92 +7,186 @@
   <title>{{ title }}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;0,7..72,700;1,7..72,400&family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
   <style>
-    :root { --bg:#FFF9D6; --ink:#2A2618; --head:#16325C; --tldr:#FFEFA6; --amber:#E0A100; --note:#4A4532; }
-    * { box-sizing: border-box; }
-    body { margin:0; background:var(--bg); color:var(--ink);
-           font: 19px/1.75 "Atkinson Hyperlegible", system-ui, sans-serif;
-           word-spacing:.08em; letter-spacing:.01em; }
-    main { max-width:1100px; margin:0 auto; padding:48px 24px 80px; }
-    h1 { color:var(--head); font-size:1.9rem; line-height:1.25; margin:0 0 24px; }
-    h2 { color:var(--head); font-size:1.4rem; line-height:1.3; margin:56px 0 16px; }
-    p  { margin:0 0 1.1em; max-width:68ch; }
-    .tldr { background:var(--tldr); border-left:4px solid var(--amber);
-            padding:16px 20px; border-radius:8px; max-width:68ch; }
-    .cols { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);
-            gap:40px; align-items:start; }
-    .visual { background:#fff; border-radius:12px; padding:16px;
-              box-shadow:0 2px 10px rgba(42,38,24,.12); margin-bottom:16px; }
-    .visual-wide { max-width:1000px; margin:20px auto 16px; }
-    .visual img { width:100%; height:auto; display:block; }
-    table { border-collapse:collapse; width:100%; font-size:.95em; }
-    th, td { border:1px solid #E6DDA8; padding:8px 10px; text-align:left; vertical-align:top; }
-    th { background:var(--tldr); color:var(--head); }
-    pre { background:#fff; padding:14px; border-radius:8px; overflow-x:auto; font-size:.85em; }
-    blockquote { margin:0 0 1.1em; padding-left:16px; border-left:3px solid var(--amber); }
-    .notes { margin-top:12px; padding-left:14px; border-left:2px solid var(--amber); max-width:68ch; }
-    .notes .label { font-size:.8em; text-transform:uppercase; letter-spacing:.06em; color:var(--note); }
-    .note { font-style:italic; color:var(--note); margin:4px 0; }
-    .note a { color:var(--head); }
-    .takeaways li { margin-bottom:.6em; }
+    /* Layout: centred reading column; wide screens add a sticky contents rail (left) and a margin for sidenotes (right).
+       Yellow is a highlighter only: TL;DR, takeaways, explained terms, progress. No scripts (check_page forbids them). */
+    :root {
+      --paper:#FFFCF3; --ink:#2A2618; --head:#16325C; --muted:#6A634C;
+      --hl:#F1CF45; --hl-soft:#FCF0BC; --line:#ECE3C4; --code:#F6F1E1; --fig-bg:transparent;
+      --serif:"Literata", Georgia, "Times New Roman", serif;
+      --sans:"Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono:ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      --measure:680px; --rail:200px; --margin:250px; --gap:48px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --paper:#1D1B16; --ink:#ECE6D3; --head:#AFC8F2; --muted:#B0A88C;
+              --hl:#DDBD45; --hl-soft:#433C1E; --line:#38331F; --code:#27241C; --fig-bg:#FFFDF5; color-scheme:dark; }
+    }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:19px/1.7 var(--serif); }
+    .page { max-width:calc(var(--rail) + var(--measure) + var(--margin) + 2 * var(--gap));
+            margin:0 auto; padding:56px 24px 96px; }
+    article { max-width:var(--measure); margin:0 auto; }
+    .rail { display:none; }
+
+    h1 { color:var(--head); font:700 2.15rem/1.2 var(--serif); margin:0 0 12px; text-wrap:balance; }
+    h2 { color:var(--head); font:700 1.45rem/1.3 var(--serif); margin:64px 0 14px; text-wrap:balance; }
+    p { margin:0 0 1.1em; }
+    a { color:var(--head); }
+    a:focus-visible, summary:focus-visible { outline:2px solid var(--hl); outline-offset:2px; border-radius:3px; }
+    .label { font:700 .72rem/1 var(--sans); letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+    .meta { font:400 .85rem/1.4 var(--sans); color:var(--muted); margin:0 0 28px; }
+
+    /* bookends: TL;DR opens, takeaways close */
+    .bookend { background:var(--hl-soft); border-radius:10px; padding:18px 22px; margin:0 0 8px; }
+    .bookend .label { display:block; margin-bottom:8px; color:var(--ink); }
+    .bookend p, .bookend ul { margin:0; }
+    .bookend li { margin-bottom:.5em; }
+    .bookend li:last-child { margin-bottom:0; }
+
+    /* contents: folded list on narrow screens, sticky rail on wide ones */
+    .toc-inline { margin:20px 0 0; font:400 .95rem/1.5 var(--sans); }
+    .toc-inline summary { cursor:pointer; color:var(--muted); font-weight:700; }
+    .toc ol { list-style:none; margin:10px 0 0; padding:0; }
+    .toc li { margin:0 0 6px; }
+    .toc a { color:var(--ink); text-decoration:none; }
+    .toc a:hover { text-decoration:underline; text-decoration-color:var(--hl); text-decoration-thickness:2px; }
+
+    section { display:flow-root; }
+    .lead { font-weight:600; }
+    .shown-as-written { font:400 .8rem/1.4 var(--sans); color:var(--muted); margin:-6px 0 14px; }
+
+    /* figures: no box, numbered caption, image links to the full-size SVG */
+    .figure { margin:6px 0 22px; }
+    .figure img { width:100%; height:auto; display:block; background:var(--fig-bg); border-radius:6px; }
+    .figure figcaption { font:400 .8rem/1.45 var(--sans); color:var(--muted); margin-top:8px; }
+    .figure .n { font-weight:700; color:var(--ink); margin-right:4px; }
+    .figure.float { float:right; width:46%; margin:6px 0 16px 32px; }
+    .figure.wide { clear:both; }
+
+    /* term explanations */
+    .term { border-bottom:2px dotted var(--hl); }
+    .sidenote { display:block; font:italic 400 .86rem/1.55 var(--serif); color:var(--muted);
+                border-left:2px solid var(--hl); padding-left:12px; margin:0 0 12px; }
+    .sidenote strong { font-style:normal; color:var(--ink); }
+    .sn { display:block; }
+    .sn + .sn { margin-top:8px; }
+    .notes { border-left:2px solid var(--hl); padding-left:12px; margin-top:8px; }
+    .note { font-style:italic; color:var(--muted); font-size:.92rem; margin:4px 0; }
+    .note strong { font-style:normal; color:var(--ink); }
+
+    /* code, tables, quotes: quiet grounds, no shadows */
+    pre { background:var(--code); padding:12px 14px; border-radius:6px; margin:0 0 1.1em;
+          font:.8rem/1.55 var(--mono); white-space:pre-wrap; overflow-wrap:anywhere; }
+    :not(pre) > code { background:var(--code); padding:1px 5px; border-radius:4px; font:.85em var(--mono); }
+    details.code { margin:0 0 1.1em; }
+    details.code summary { cursor:pointer; font:700 .85rem/1.4 var(--sans); color:var(--head); padding:4px 0; }
+    details.code pre { margin-top:8px; }
+    .table { overflow-x:auto; margin:0 0 1.1em; }
+    table { border-collapse:collapse; width:100%; font:400 .88rem/1.5 var(--sans); }
+    th, td { border-bottom:1px solid var(--line); padding:8px 10px; text-align:left; vertical-align:top; }
+    th { border-bottom:2px solid var(--line); color:var(--head); }
+    blockquote { margin:0 0 1.1em; padding-left:16px; border-left:3px solid var(--line); font-style:italic; }
+
+    .glossary dt { font-weight:700; margin-top:12px; }
+    .glossary dd { margin:2px 0 0; color:var(--muted); font-size:.95rem; }
+
+    /* reading progress, only where the browser has scroll-driven animations */
+    .progress { display:none; }
+    @supports (animation-timeline: scroll()) {
+      .progress { display:block; position:fixed; inset:0 0 auto; height:3px; background:var(--hl); z-index:5;
+                  transform-origin:0 50%; animation:grow linear both; animation-timeline:scroll(root); }
+      @keyframes grow { from { transform:scaleX(0); } to { transform:scaleX(1); } }
+    }
+    @media (prefers-reduced-motion: reduce) { .progress { display:none; } }
+
+    /* medium: wide figures break out of the text column */
+    @media (min-width:900px) {
+      .figure.wide { width:min(960px, calc(100vw - 48px)); position:relative; left:50%; transform:translateX(-50%); }
+    }
+    /* wide: contents rail + sidenote margin */
+    @media (min-width:1220px) {
+      .page { display:grid; grid-template-columns:var(--rail) var(--measure) var(--margin);
+              column-gap:var(--gap); justify-content:center; }
+      .rail { display:block; grid-column:1; position:sticky; top:40px; align-self:start;
+              max-height:calc(100vh - 80px); overflow:auto; font:400 .85rem/1.45 var(--sans); padding-top:6px; }
+      article { grid-column:2; margin:0; }
+      .toc-inline { display:none; }
+      /* absolute with no top = stays at its paragraph's height, and ignores floated figures */
+      section { position:relative; }
+      .sidenote { position:absolute; right:calc(-1 * (var(--margin) + var(--gap))); width:var(--margin); margin:4px 0 0;
+                  border-left:0; padding-left:0; border-top:2px solid var(--hl); padding-top:6px; }
+      .figure.wide { width:calc(100% + var(--margin) + var(--gap)); left:0; transform:none; }
+    }
     @media (max-width:760px) {
       body { font-size:18px; }
-      main { padding:28px 16px 56px; }
-      .cols { grid-template-columns:1fr; gap:16px; }
+      .page { padding:32px 16px 64px; }
+      h1 { font-size:1.75rem; }
+      .figure.float { float:none; width:auto; margin:6px 0 20px; }
     }
   </style>
 </head>
 <body>
-<main>
-  <h1>{{ title }}</h1>
-  <p class="tldr"><strong>TL;DR:</strong> {{ tldr }}</p>
+<div class="progress" aria-hidden="true"></div>
+<div class="page">
+  {% macro toc_list() %}<ol>{% for s in sections %}<li><a href="#{{ s.id }}">{{ s.heading }}</a></li>{% endfor %}<li><a href="#takeaways">Key takeaways</a></li></ol>{% endmacro %}
+  <nav class="rail toc" aria-label="Contents"><span class="label">Contents</span>{{ toc_list() }}</nav>
 
-  {% for s in sections %}
-  <section id="{{ s.id }}">
-    <h2>{{ s.heading }}</h2>
+  <article>
+    <h1>{{ title }}</h1>
+    <p class="meta">{{ minutes }} min read · {{ sections | length }} sections{% if figures %} · {{ figures }} figure{{ "s" if figures != 1 }}{% endif %}</p>
+    <div class="bookend"><span class="label">TL;DR</span><p>{{ tldr | inline }}</p></div>
+    <details class="toc toc-inline"><summary>Contents</summary>{{ toc_list() }}</details>
 
-    {% if s.mode == "simplified_visual" %}
-    {% macro figs(vs) %}{% for v in vs %}
-        <figure class="visual{% if v.wide %} visual-wide{% endif %}">
-          {% if v.kind == "table" %}
-          <table>
-            <tr>{% for c in v.columns %}<th>{{ c }}</th>{% endfor %}</tr>
-            {% for row in v.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
-          </table>
-          {% else %}
-          <img src="{{ v.url }}" alt="{{ v.alt }}" loading="lazy">
-          {% endif %}
-        </figure>
-    {% endfor %}{% endmacro %}
-    {% if s.wide %}
-    <div class="text">{{ s.body_html }}</div>
-    <div class="visuals">{{ figs(s.visuals) }}</div>
-    {% else %}
-    <div class="cols">
-      <div class="text">{{ s.body_html }}</div>
-      <div class="visuals">{{ figs(s.visuals) }}</div>
-    </div>
+    {% macro fig(v, cls) %}
+    <figure class="figure {{ cls }}">
+      {% if v.kind == "table" %}
+      <div class="table"><table>
+        <tr>{% for c in v.columns %}<th>{{ c }}</th>{% endfor %}</tr>
+        {% for row in v.rows %}<tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}
+      </table></div>
+      {% else %}
+      <a href="{{ v.url }}" title="Open full size"><img src="{{ v.url }}" alt="{{ v.alt }}" loading="lazy"></a>
+      {% endif %}
+      <figcaption><span class="n">Figure {{ v.n }}</span>{{ v.caption }}</figcaption>
+    </figure>
+    {% endmacro %}
+
+    {% for s in sections %}
+    <section id="{{ s.id }}">
+      <h2>{{ s.heading }}</h2>
+      {% if s.fallback %}<p class="shown-as-written">Shown as written.</p>{% endif %}
+      {% if s.mode == "simplified_visual" and not s.wide %}{% for v in s.visuals %}{{ fig(v, "float") }}{% endfor %}{% endif %}
+      {{ s.body_html }}
+      {% if s.mode == "simplified_visual" and s.wide %}{% for v in s.visuals %}{{ fig(v, "wide" if v.wide else "") }}{% endfor %}{% endif %}
+      {% if s.notes %}
+      <div class="notes">
+        {% for n in s.notes %}
+        <p class="note"><strong>{{ n.term }}</strong> {{ n.definition | inline }}{% if n.source_url %} (<a href="{{ n.source_url }}">source</a>){% endif %}</p>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </section>
+    {% endfor %}
+
+    <section id="takeaways">
+      <h2>Key takeaways</h2>
+      <div class="bookend"><ul>{% for t in takeaways %}<li>{{ t | inline }}</li>{% endfor %}</ul></div>
+    </section>
+
+    {% if glossary %}
+    <section class="glossary">
+      <h2>Terms explained</h2>
+      <dl>
+        {% for g in glossary %}
+        <dt>{{ g.term }}</dt>
+        <dd>{{ g.definition | inline }}{% if g.source_url %} (<a href="{{ g.source_url }}">source</a>){% endif %}</dd>
+        {% endfor %}
+      </dl>
+    </section>
     {% endif %}
-    {% else %}
-    <div class="text">{{ s.body_html }}</div>
-    {% endif %}
-
-    {% if s.notes %}
-    <div class="notes">
-      <div class="label">Added explanation</div>
-      {% for n in s.notes %}
-      <p class="note"><strong>{{ n.term }}</strong> — {{ n.definition }}{% if n.source_url %} (<a href="{{ n.source_url }}">source</a>){% endif %}</p>
-      {% endfor %}
-    </div>
-    {% endif %}
-  </section>
-  {% endfor %}
-
-  <section class="takeaways">
-    <h2>Key takeaways</h2>
-    <ul>{% for t in takeaways %}<li>{{ t }}</li>{% endfor %}</ul>
-  </section>
-</main>
+  </article>
+</div>
 </body>
 </html>

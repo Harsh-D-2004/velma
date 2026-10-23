@@ -53,3 +53,16 @@ def acquire(key: str, tokens: int = 0, block: bool = True) -> bool:
             time.sleep(wait + 0.05)
     finally:
         db.close()
+
+
+def remaining(key: str) -> int | None:
+    """Calls left in the longest rate-limit window of `key` (None if it has no request cap)."""
+    window, max_req, _ = RATE_LIMITS.get(key, [(0, None, None)])[-1]
+    if max_req is None:
+        return None
+    db = _db()
+    try:
+        used = db.execute("SELECT COUNT(*) FROM usage WHERE key=? AND ts>?", (key, time.time() - window)).fetchone()[0]
+    finally:
+        db.close()
+    return max(max_req - used, 0)

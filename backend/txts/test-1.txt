@@ -1,0 +1,633 @@
+Skip to content
+Parallel AI Logo
+Home
+Pricing
+Our Customers
+
+White Label
+Blog
+Learn
+
+Log in
+Sign up
+AI Infrastructure
+, 
+AI/Tech
+One Route, Every Interface: How We Built Our API, OpenAPI Spec, and MCP Server
+David
+October 19, 2026
+One Route, Every Interface: How we built our API, OpenAPI spec, and MCP server
+Parallel AI is a GTM infrastructure layer: AI employees, smart lists, sequences, content, and voice agents. Teams run it all from our web app, from their own code, or from the AI assistant they already use. That last part matters. More and more, the caller isn’t a person clicking a button. It’s Claude, ChatGPT, Cursor, or one of our own in-app agents acting on someone’s behalf.
+
+That gave us an engineering problem. Today the platform exposes 603 operations across 474 paths in 42 categories. Each one has to work for four callers. That’s our React app, developers using the REST API, external MCP clients, and the AI employees running inside the product. We didn’t want four implementations, four auth stories, or four sets of docs drifting apart.
+
+This post walks through the design we landed on, with example code, so another team can build the same thing. The snippets are simplified examples written for this post around a fictional “projects” API, not our production source. The short version: a Flask route is the single source of truth. Documentation decorators describe it. A spec builder turns those descriptions into OpenAPI on every request. The MCP server and in-app agents treat that spec as a live catalog. They execute operations by sending the request back into the same Flask app. That way they get the same auth, validation, logging, and tenant checks as everyone else.
+
+The architecture at a glance
+Web app
+React SPA
+API clients
+scripts, backends, n8n
+MCP clients
+Claude, ChatGPT, Cursor
+AI employees
+our custom agents
+Platform tools
+list_capabilities
+get_action_details
+execute_action
+Auth +
+tenant scope
+one decorator
+tenant gate
+Flask route
++ docs metadata
+Spec builder
+OpenAPI 3.0.3, built per request
+ReDoc
+/docs
+JWT (session)
+API key or pak_ key
+JSON-RPC
+Python call
+in-process
+identity
+reads docs metadata
+operation index
+/docs/openapi.json
+Four callers, one route. Web and API traffic reaches the route over HTTPS. MCP clients and in-app agents reach it through three platform tools that dispatch in-process. The OpenAPI spec is generated from the route decorators and feeds both the public docs and the tool catalog.
+Three design decisions carry most of the weight:
+
+Routes are written once. The same view function is registered under the web app’s path and under /api/v0/. One auth decorator covers both, accepting session JWTs, company API keys, and personal access keys.
+The spec is derived, never hand-written. Decorators attach metadata to the view function; a builder walks Flask’s URL map and emits OpenAPI 3.0.3. If a route exists and is documented, it’s in the spec, the docs, and the MCP catalog. No separate step to forget.
+Agents get a catalog, not 603 tools. MCP clients see four small tools that let them search the catalog, read one operation’s schema, and execute it. The tool list never grows, no matter how many endpoints we add.
+Layer 1: one route serves the app and the public API
+Every public operation is an ordinary Flask view. We register each one twice: once at the path the React app uses, and once under the versioned public prefix. The handler doesn’t know or care which door the request came through.
+
+projects = Blueprint('projects', __name__)
+
+@projects.get('/projects')                  # used by the web app
+@projects.get('/api/v1/projects')           # public API, MCP, agents
+@authenticate                               # session token, API key, or personal key
+@docs.params(ProjectQuery)
+@docs.returns(ProjectPage, description='A page of projects')
+@docs.fails({401: 'Not authenticated'})
+def listProjects():
+    """List projects in the current workspace.
+
+    Results are newest first. Use `status` to narrow the list.
+    """
+    caller = g.caller
+    page = int(request.args.get('page', 1))
+    rows = project_repo.page(caller.workspaceId, page=page, status=request.args.get('status'))
+    return jsonify(rows), 200
+The spec builder only picks up rules under the public prefix, so internal routes never leak into the public contract. The docstring’s first line becomes the OpenAPI summary; the rest becomes the description. That description is what an AI agent reads when deciding whether this is the operation it wants. So we write docstrings for that reader.
+
+Layer 2: documentation decorators that do nothing at runtime
+Most OpenAPI libraries for Flask want to own serialization: you return objects, the framework validates and dumps them. We had hundreds of existing routes returning jsonify(...) and didn’t want to rewrite them. Our decorators just attach metadata to the function. Request handling doesn’t change.
+
+class Docs:
+    """Decorators that record OpenAPI metadata on a view. They never touch the request."""
+
+    @staticmethod
+    def _info(fn):
+        fn.__dict__.setdefault('_apidoc', {})
+        return fn._apidoc
+
+    def params(self, schema):
+        def wrap(fn):
+            self._info(fn).setdefault('params', []).append(schema)
+            return fn
+        return wrap
+
+    def body(self, schema, description=None):
+        def wrap(fn):
+            self._info(fn)['body'] = (schema, description)
+            return fn
+        return wrap
+
+    def returns(self, schema=None, status=200, description='OK'):
+        def wrap(fn):
+            self._info(fn).setdefault('responses', {})[status] = (schema, description)
+            return fn
+        return wrap
+
+    def fails(self, codes):
+        def wrap(fn):
+            responses = self._info(fn).setdefault('responses', {})
+            for status, description in codes.items():
+                responses[status] = ('Error', description)
+            return fn
+        return wrap
+
+
+docs = Docs()
+Schemas are plain Marshmallow classes. Field metadata carries the descriptions, validate.OneOf becomes an enum, and load_default becomes the documented default. Those three details matter a lot for agents: an enum tells a model exactly which strings are legal instead of leaving it to guess.
+
+class ProjectQuery(Schema):
+    page = fields.Integer(load_default=1, metadata={'description': 'Page number, starting at 1'})
+    status = fields.String(
+        validate=validate.OneOf(['active', 'paused', 'archived']),
+        metadata={'description': 'Only return projects with this status'},
+    )
+    search = fields.String(metadata={'description': 'Case-insensitive match on the project name'})
+The trade-off is clear: the decorators don’t validate, so the docs can disagree with the handler. In practice, the opposite risk was bigger. Requiring a serialization rewrite would have meant most routes never got documented. We handle drift in code review instead. Agents run against these schemas all day, so a wrong schema usually shows up fast as a failed tool call.
+
+Layer 3: generating the OpenAPI spec from the URL map
+The builder is about 200 lines of plain Python with no OpenAPI library. It iterates app.url_map and keeps the rules under /api/v0/ whose view function carries documentation metadata. For each rule, it emits one operation per HTTP method.
+
+PUBLIC_PREFIX = '/api/v1/'
+
+def buildOpenApi(app, serverUrl):
+    spec = {'openapi': '3.0.3', 'info': API_INFO, 'servers': [{'url': serverUrl}],
+            'paths': {}, 'tags': [], 'components': COMPONENTS}
+    tags = set()
+
+    for rule in app.url_map.iter_rules():
+        view = app.view_functions[rule.endpoint]
+        info = getattr(view, '_apidoc', None)
+        if not rule.rule.startswith(PUBLIC_PREFIX) or info is None:
+            continue                                   # private or undocumented
+
+        path = re.sub(r'<(?:\w+:)?(\w+)>', r'{\1}', rule.rule)   # <int:id> -> {id}
+        group, func = rule.endpoint.split('.', 1)
+        tag = group.replace('_', ' ').title()
+        tags.add(tag)
+        summary, _, description = (view.__doc__ or '').strip().partition('\n')
+
+        for verb in sorted(rule.methods - {'HEAD', 'OPTIONS'}):
+            spec['paths'].setdefault(path, {})[verb.lower()] = {
+                'operationId': f'{group}_{func}',      # e.g. projects_listProjects
+                'tags': [tag],
+                'summary': summary,
+                'description': description.strip(),
+                'parameters': pathParams(rule) + queryParams(info.get('params', [])),
+                **requestBody(info.get('body')),
+                'responses': responses(info.get('responses', {})),
+            }
+
+    spec['tags'] = [{'name': t, 'description': CATEGORY_NOTES.get(t, '')} for t in sorted(tags)]
+    return spec
+A few details are worth copying:
+
+operationId = blueprint + camelCased function name. It’s unique by construction and readable by a model (sequences_saveSequence, agents_listAgents). There’s a catch. Renaming a Python function now renames a public identifier that agents and saved prompts depend on. We treat view function names as part of the public API.
+Tags come from blueprints. With one blueprint per product area, you get sensible categories for free. There’s an override for the rare blueprint that spans two areas.
+Tag descriptions are written for agents. Each category has a one-paragraph explanation. They show up in ReDoc and in the MCP tool description. That’s where a model decides which category to browse. Some include short workflow hints, like which three calls set up a sending domain.
+The spec is served at /docs/openapi.json and rendered by ReDoc at /docs. We build it on demand, not at deploy time. It can never be stale. Here’s what one generated operation looks like (trimmed):
+
+"/api/v1/projects": {
+  "get": {
+    "operationId": "projects_listProjects",
+    "tags": ["Projects"],
+    "summary": "List projects in the current workspace.",
+    "description": "Results are newest first. Use `status` to narrow the list.",
+    "parameters": [
+      {"name": "page", "in": "query", "required": false,
+       "schema": {"type": "integer", "default": 1, "description": "Page number, starting at 1"}},
+      {"name": "status", "in": "query", "required": false,
+       "schema": {"type": "string", "enum": ["active", "paused", "archived"]}}
+    ],
+    "responses": {
+      "200": {"description": "A page of projects", "content": {"application/json": {"schema": {"...": "..."}}}},
+      "401": {"description": "Not authenticated",
+              "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+    }
+  }
+}
+Auth: three credentials, one identity, one tenant gate
+Every caller ends up as the same small identity record, and every request goes through the same check: the caller belongs to the company it’s touching.
+
+Session JWT
+web app login
+Company API key
+stored as SHA-256 hash
+Personal access key
+pak_…, also hashed
+Resolve identity
+{uid, companyId,
+authType}
+Company gate
+header, query, path,
+JSON body, form
+Handler
+every companyId
+member
+non-member: 401, logged
+Session JWTs, company API keys, and personal access keys all resolve to {uid, companyId, authType}. Then a single gate checks every client-supplied companyId before the handler runs.
+Credential	Scope	Typical caller
+Session JWT	The logged-in user; company chosen per request	Our React app
+Company API key	One company	Backend integrations, CI jobs, n8n workflows
+Personal access key (pak_)	Every company the user belongs to; X-Company-ID selects one	Multi-company scripts, MCP clients (including OAuth-issued tokens)
+We accept keys in either X-API-Key or Authorization: Bearer, so OpenAI- and Anthropic-style SDKs work unchanged. A prefix tells us which store to check. Both stores keep only a SHA-256 hash of the key, never the key itself.
+
+def readCredential(req):
+    """Accept either header style so OpenAI- and Anthropic-style SDKs work as-is."""
+    if key := req.headers.get('X-API-Key'):
+        return key
+    scheme, _, token = req.headers.get('Authorization', '').partition(' ')
+    return token.strip() if scheme.lower() == 'bearer' else None
+
+
+def identify(token):
+    """Turn any credential into the same Caller record, or None."""
+    digest = hashlib.sha256(token.encode()).hexdigest()          # we only store hashes
+    if token.startswith('pak_'):
+        key = personal_keys.findByHash(digest)
+        return key and Caller(userId=key.userId, workspaceId=None, kind='personal')
+    key = workspace_keys.findByHash(digest)
+    return key and Caller(userId=key.userId, workspaceId=key.workspaceId, kind='workspace')
+The most important piece is the company gate. Tenant checks used to be a per-route habit: each handler was supposed to call an access-check helper. That kind of rule eventually gets forgotten in one of hundreds of routes. Now both auth decorators call one function after authentication. It collects every companyId the client supplied, from the header, query string, camelCase path segment, top-level JSON body field, and form field, and rejects the request if the user isn’t a member of any of them. Each denial is logged with a fixed token we can search for. A route can’t forget the check anymore, because the route never performs it.
+
+def workspaceIdsInRequest(req):
+    """Every place a client can name a workspace."""
+    found = [
+        ('header', req.headers.get('X-Workspace-ID')),
+        ('query', req.args.get('workspaceId')),
+        ('path', (req.view_args or {}).get('workspaceId')),
+        ('form', req.form.get('workspaceId')),
+    ]
+    body = req.get_json(silent=True)
+    if isinstance(body, dict):
+        found.append(('body', body.get('workspaceId')))
+    return [(source, value) for source, value in found if value]
+
+
+def checkTenant(caller, req):
+    allowed = memberships(caller.userId)
+    for source, workspaceId in workspaceIdsInRequest(req):
+        if workspaceId not in allowed:
+            log.warning('TENANT_DENIED user=%s workspace=%s via=%s', caller.userId, workspaceId, source)
+            abort(403)
+MCP: why we expose four tools instead of 603
+The obvious way to put an API behind MCP is one tool per operation. With 603 operations, we’d be putting up to 1.4 MB of operation definitions (the size of our spec’s paths) into every conversation before the user has typed anything. Tool selection gets worse as the list grows, and some clients cap the number of tools. Every new endpoint would make the server harder to use.
+
+Instead we use progressive disclosure. The server exposes a small, fixed set of meta-tools. The agent pulls in detail only for the operation it needs:
+
+Tool	What it does	Annotations
+platform_list_companies	Lists the companies the credential can act on, so the agent can pick a companyId.	read-only, idempotent
+platform_list_capabilities	Searches the catalog by category and/or natural-language query. Returns paginated operationId + method + path + summary, grouped by tag.	read-only, idempotent
+platform_get_action_details	Returns one operation’s full parameters, request body schema, and responses, plus any required skill text.	read-only, idempotent
+platform_execute_action	Executes an operation with pathParams, queryParams, and body. Auth is injected server-side.	destructive, open-world
+The tool definitions are generated per request. The category list and descriptions come from the same category descriptions the spec uses. So a new product area shows up in the MCP tool description as soon as its blueprint ships. companyId is required only when the credential can’t imply one. That’s a personal access key sent without X-Company-ID. The example below uses generic tool names (search_actions, run_action) and calls a tenant a workspace.
+
+def toolDefinitions(caller, categoryNotes):
+    needsWorkspace = caller.workspaceId is None       # personal keys must name one per call
+    return [
+        {
+            'name': 'search_actions',
+            'description': 'Find API actions by category or plain-language query.\n\n'
+                           + '\n'.join(f'- {name}: {note}' for name, note in categoryNotes.items()),
+            'inputSchema': {'type': 'object', 'properties': {
+                'category': {'type': 'string', 'enum': list(categoryNotes)},
+                'query': {'type': 'string'},
+                'page': {'type': 'integer', 'default': 1},
+            }},
+            'annotations': {'readOnlyHint': True, 'idempotentHint': True},
+        },
+        {
+            'name': 'run_action',
+            'description': 'Run one API action. Read its details first.',
+            'inputSchema': {
+                'type': 'object',
+                'required': ['operationId'] + (['workspaceId'] if needsWorkspace else []),
+                'properties': {
+                    'operationId': {'type': 'string'},
+                    'workspaceId': {'type': 'string'},
+                    'pathParams': {'type': 'object'},
+                    'queryParams': {'type': 'object'},
+                    'body': {'type': 'object'},
+                },
+            },
+            # It can reach DELETE endpoints and send messages, so say so.
+            'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': True},
+        },
+        # ...plus list_workspaces and describe_action
+    ]
+Tool annotations deserve care. App directory reviews (ChatGPT apps, for example) check them. Clients use them to decide when to ask the user for confirmation. A generic “execute anything” tool has to be marked destructive even though most calls are reads. That costs some convenience, but labeling it otherwise would be wrong.
+
+Here’s the full round trip for one task:
+
+MCP client
+Claude, Cursor…
+/api/v0/mcp
+JSON-RPC 2.0
+Spec + pgvector
+operation index
+Flask route
+same as public API
+1. list_capabilities {query}
+2. embed query, cosine top-k
+3. ~10 operation summaries
+4. operationIds + relatedSkills
+5. get_action_details {operationId}
+6. lookup by operationId
+7. params, body schema, required skills
+8. execute_action {operationId, body}
+9. in-process: same auth + logging
+10. {status, success, data}
+11. result as MCP text content
+One task, three tool calls (steps 1, 5, and 8 are JSON-RPC tools/call requests). Discovery runs a vector search over the operation index. Details come from the live spec. Execution re-enters the same Flask route a REST client would hit.
+Semantic search over the operation catalog
+Substring search over 603 summaries works poorly for natural-language queries. “Add these people to my outreach campaign” doesn’t contain the word “sequence”. So platform_list_capabilities runs a vector search over embeddings of each operation, stored in Postgres with pgvector.
+
+class ActionEmbedding(Base):
+    __tablename__ = 'action_embeddings'
+
+    operationId = Column(Text, primary_key=True)
+    category = Column(Text, index=True)
+    summary = Column(Text)
+    sourceHash = Column(String(64))        # sha256 of the text we embedded
+    vector = Column(Vector(1536))
+
+    __table_args__ = (
+        Index('action_embeddings_hnsw', 'vector', postgresql_using='hnsw',
+              postgresql_ops={'vector': 'vector_cosine_ops'}),
+    )
+
+
+def embeddingText(op):
+    return f"{op['method']} {op['path']} | {op['category']} | {op['summary']} | {op['description']}"
+The cache keeps itself up to date:
+
+On a query, we hash each live operation’s method, path, tags, summary, and description. Then we compare that hash with the stored contentHash. Changed or new operations are re-embedded in a background worker and upserted with ON CONFLICT DO UPDATE.
+Rows whose operationId is no longer in the live spec are deleted. Search results are filtered against the live index again, so an agent can never be handed a removed operation.
+While the cache is rebuilding, or if the embedding call fails, the tool falls back to substring matching. Discovery gets less precise but never stops working.
+Parameters and schemas are not embedded. They’re read from the live spec at call time, so changing a field description doesn’t invalidate the cache.
+def searchActions(session, query, liveOperationIds, category=None, limit=10):
+    distance = ActionEmbedding.vector.cosine_distance(embed(query))
+    stmt = select(ActionEmbedding.operationId, distance.label('d')).order_by(distance).limit(limit * 3)
+    if category:
+        stmt = stmt.where(ActionEmbedding.category == category)
+    hits = [row.operationId for row in session.execute(stmt)]
+    # Drop anything that left the API since the index was built.
+    return [op for op in hits if op in liveOperationIds][:limit]
+Executing an operation: re-enter the app, don’t call it over HTTP
+Our first version of platform_execute_action made a real HTTP request to our own API. It worked. But every call added a network hop and a load balancer pass. Worse, the HTTP client’s 60-second timeout killed long-running operations, even though the server finished them.
+
+Now we dispatch the request through Flask’s own WSGI stack inside the current process with test_client(). Nothing is stubbed. Routing, auth decorators, the tenant gate, request logging, and error handlers all run exactly as they would if the request had come in from outside. The agent can’t do anything the credential couldn’t do over HTTP.
+
+def runInProcess(app, method, path, credential, workspaceId=None, query=None, body=None):
+    headers = {'Authorization': f'Bearer {credential}'}
+    if workspaceId:
+        headers['X-Workspace-ID'] = workspaceId
+
+    # New app context = new DB session, so a failure in the nested call
+    # cannot leave the caller's session in a broken state.
+    with app.app_context():
+        response = app.test_client().open(
+            path, method=method, headers=headers, query_string=query, json=body,
+            environ_overrides={'myapp.internal_call': True},   # lets metrics skip double counting
+        )
+    payload = response.get_json(silent=True)
+    return {
+        'status': response.status_code,
+        'ok': response.status_code < 400,
+        'data': payload if payload is not None else response.get_data(as_text=True),
+    }
+The credential is the caller’s own. We forward it as Authorization: Bearer, and X-Company-ID is set from the tool argument. Then there’s the environ flag. Analytics uses it to tell an internal dispatch apart from external traffic, so a single MCP call doesn’t get counted as two API requests. One edge case remains. If the route isn’t registered on the current node, we fall back to a real HTTP request.
+
+One lesson came from that fallback path. Some of our worker nodes once booted without the API blueprints registered. The local spec was empty, and every scheduled agent run got “0 operations” back without so much as an error. Now, if the locally built spec has no paths, we log a warning and load the spec from a web node’s /docs/openapi.json. No more handing the model an empty toolset.
+
+The MCP transport itself
+We implement the Streamable HTTP transport (protocol 2025-03-26) directly in Flask. No SDK, no long-lived connection. POST /api/v0/mcp takes a JSON-RPC 2.0 message or batch and returns JSON. Because every request carries its own bearer credential and all of our state lives in Postgres, any server behind the load balancer can answer any request. The Mcp-Session-Id header is echoed back, but we don’t rely on it for anything that matters.
+
+@mcp.post('/mcp')
+def mcpEndpoint():
+    caller = identify(readCredential(request) or '')
+    if caller is None:
+        return unauthorized()                      # 401 + WWW-Authenticate, see OAuth below
+    message = request.get_json(silent=True)
+    if isinstance(message, list):                  # batch
+        replies = [r for r in (dispatch(m, caller) for m in message) if r is not None]
+        return (jsonify(replies), 200) if replies else ('', 202)
+    reply = dispatch(message, caller)
+    return (jsonify(reply), 200) if reply is not None else ('', 202)
+
+
+def dispatch(message, caller):
+    msgId, method = message.get('id'), message.get('method')
+    params = message.get('params') or {}
+    if method == 'initialize':
+        return ok(msgId, {'protocolVersion': '2025-03-26',
+                          'capabilities': {'tools': {}},
+                          'serverInfo': {'name': 'example-mcp', 'version': '1.0.0'}})
+    if method.startswith('notifications/'):
+        return None                                # notifications never get a reply
+    if method == 'tools/list':
+        return ok(msgId, {'tools': toolDefinitions(caller, CATEGORY_NOTES)})
+    if method == 'tools/call':
+        try:
+            text = callTool(params['name'], params.get('arguments') or {}, caller)
+        except InvalidArguments as e:
+            return error(msgId, -32602, str(e))
+        return ok(msgId, {'content': [{'type': 'text', 'text': text}]})
+    if method == 'ping':
+        return ok(msgId, {})
+    return error(msgId, -32601, f'Unknown method {method}')
+
+
+def error(msgId, code, message):
+    log.warning('MCP error %s: %s', code, message)     # HTTP stays 200, so log it here
+    return {'jsonrpc': '2.0', 'id': msgId, 'error': {'code': code, 'message': message}}
+There’s one operational detail that’s easy to miss. MCP returns HTTP 200 even when a call fails, because the error lives in the JSON-RPC body. Status-code dashboards never show those failures. We build every error response in one function and log a warning there, so MCP failures show up in our logs like any other error.
+
+We also accept both operationId and operation_id. The same goes for pathParams and path_params. Models send either form. Some also send body as a JSON string instead of an object. At times the string has extra closing brackets. A small validator parses the string and strips the extra brackets at the end. Anything else gets a clear error. Small allowances like these removed a surprising number of failed calls.
+
+OAuth so Claude and ChatGPT can connect without pasting a key
+Desktop clients and Claude Code can send a static bearer header. The web and mobile apps can’t. Claude and ChatGPT on those platforms only connect to remote MCP servers through OAuth. The MCP authorization spec builds on existing RFCs, and we implemented the minimum needed:
+
+Browser + user
+MCP client
+ChatGPT, Claude
+Platform
+MCP + OAuth server
+1. POST /api/v0/mcp (no token)
+2. 401 + WWW-Authenticate: resource_metadata
+3. GET /.well-known/oauth-protected-resource
+4. GET /.well-known/oauth-authorization-server
+5. POST /oauth/register -> client_id
+6. open authorize URL
+7. GET /oauth/authorize (PKCE S256)
+8. login if needed, then consent page
+9. Allow
+10. 302 redirect_uri?code=…
+11. code
+12. POST /oauth/token (code + verifier)
+13. access_token = new pak_ key
+14. POST /api/v0/mcp Bearer pak_…
+The 401 from the MCP endpoint starts discovery. The client registers itself, and the user consents in the browser. The token endpoint then returns a personal access key. Our existing API key path already knows how to validate it.
+RFC 9728 protected-resource metadata at /.well-known/oauth-protected-resource, plus a WWW-Authenticate: Bearer resource_metadata="..." header on every 401 from the MCP endpoint. Without that header, OAuth-only clients simply fail instead of starting the flow.
+RFC 8414 authorization-server metadata at /.well-known/oauth-authorization-server.
+RFC 7591 dynamic client registration at /oauth/register. Clients are public (no secret), so they are secured by exact redirect-URI matching and PKCE.
+Authorization code + PKCE (S256 only). Codes are single-use and expire after five minutes. The consent page is server-rendered, so it works in any in-app browser.
+The decision we are happiest with: the OAuth access token is a personal access key. We did not build a separate token store, refresh flow, or validation path. The token endpoint creates a pak_ key named after the client (for example “MCP: ChatGPT”). The MCP endpoint validates it through the same code as any other personal access key, and the user can see and revoke it in their profile alongside their other keys. Clients and authorization codes are stored in an existing TTL’d key-value table, so the whole OAuth server needed no new database tables.
+
+@oauth.post('/oauth/token')
+def issueToken():
+    form = request.form
+    if form.get('grant_type') != 'authorization_code':
+        return jsonify(error='unsupported_grant_type'), 400
+
+    grant = codes.take(form.get('code'))           # deletes on read: single use
+    valid = (
+        grant is not None
+        and grant.clientId == form.get('client_id')
+        and grant.redirectUri == form.get('redirect_uri')
+        and pkceMatches(form.get('code_verifier', ''), grant.codeChallenge)
+    )
+    if not valid:
+        return jsonify(error='invalid_grant'), 400
+
+    # The access token is an ordinary personal key: same validation, same "revoke" button.
+    token = personal_keys.create(userId=grant.userId, label=f'MCP: {grant.clientName}')
+    response = jsonify(access_token=token, token_type='Bearer', scope='mcp')
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def pkceMatches(verifier, challenge):
+    digest = hashlib.sha256(verifier.encode('ascii')).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b'=').decode('ascii')
+    return bool(verifier) and hmac.compare_digest(expected, challenge)
+One production lesson: clients cache their registration indefinitely. Our first version stored client registrations with a 30-day TTL. Once one expired, ChatGPT kept presenting its cached client_id, got “Unknown client_id” back, and had no way to recover. Registrations are now effectively permanent. If one goes missing, we re-create it on the fly from the presented client_id and redirect URI. Registration is open to anyone anyway, so this grants nothing a fresh /oauth/register call wouldn’t. PKCE and user consent still protect the flow.
+
+The token is user-scoped, not company-scoped, so a single OAuth connection can manage every company the user belongs to. That suits agencies running many client workspaces. The agent calls platform_list_companies and passes companyId per action, and the tenant gate checks every one.
+
+Skills: telling agents how, not just what
+A schema tells an agent which fields an operation accepts. It doesn’t say what a good cold email looks like. Nor does it spell out the order of steps to verify a sending domain. For that we attach skills, short Markdown playbooks, to the catalog at two levels:
+
+Per category. A category can name related skills. They appear as x-relatedSkills on the OpenAPI tag, since an x- extension keeps the spec valid. The same skills show up as relatedSkills in platform_list_capabilities results. The agent learns a playbook exists while it’s still browsing.
+Per operation. An operation can require skills whose full text is included in platform_get_action_details. At first we only named the skill, and agents often didn’t fetch it. Including the text at the point where the agent is about to write a sequence step fixed that.
+# Category-level: the agent learns a playbook exists while browsing.
+CATEGORY_PLAYBOOKS = {
+    'Projects': ['project-setup'],
+    'Invoices': ['billing-etiquette'],
+}
+
+# Operation-level: the full playbook text ships with the action details.
+ACTION_PLAYBOOKS = {
+    'invoices_sendInvoice': ['billing-etiquette'],
+}
+
+def describeAction(operationId):
+    details = operationDetails(operationId)
+    if slugs := ACTION_PLAYBOOKS.get(operationId):
+        details['requiredPlaybooks'] = [loadPlaybook(slug) for slug in slugs]
+        details['instruction'] = 'Follow these playbooks when writing content for this action.'
+    return details
+Companies can also add their own skills, which are matched to categories the same way. An agency can publish its house style for outreach. Every agent connected to that workspace receives it when it browses the Sequences category.
+
+The same tools inside the product
+Our custom agents, the AI employees inside the product, call the same three functions as their tools. There’s one catalog, one search index, and one executor. A fix to discovery improves Claude Desktop, ChatGPT, and our own agents together.
+
+def agentTools(app, getCredential, workspaceId):
+    """getCredential is a function, not a string: it is called on every action,
+    so a short-lived service token never expires halfway through a long run."""
+
+    def runAction(operationId, pathParams=None, queryParams=None, body=None):
+        method, path = resolveOperation(operationId, pathParams or {})
+        return runInProcess(app, method, path, getCredential(), workspaceId,
+                            query=queryParams, body=body)
+
+    return {
+        'search_actions': searchActionsTool,
+        'describe_action': describeAction,
+        'run_action': runAction,
+    }
+The callable credential came from a real bug. Scheduled agent runs received a short-lived service token when their tools were built. Long runs started returning 401s about halfway through. Passing a function that mints a token per request fixed it without changing anything else.
+
+Connecting a client
+For Claude Code, or any client that can send a header:
+
+claude mcp add --transport http parallel https://api.parallellabs.app/api/v0/mcp \
+  --header "Authorization: Bearer pak_your_personal_access_key"
+For clients that only support stdio, mcp-remote bridges to the HTTP endpoint:
+
+{
+  "mcpServers": {
+    "parallel": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://api.parallellabs.app/api/v0/mcp",
+               "--header", "Authorization:${AUTH_HEADER}"],
+      "env": { "AUTH_HEADER": "Bearer your_company_api_key" }
+    }
+  }
+}
+In the Claude or ChatGPT apps, add https://api.parallellabs.app/api/v0/mcp as a custom connector. The OAuth flow above takes care of the rest. The full reference is at api.parallellabs.app/docs.
+
+What we would tell a team building this today
+Decision	Why	Cost we accepted
+Docs-only decorators	Documenting 600 existing routes needed zero handler rewrites	Docs can drift from behavior; caught in review and by failing agent calls
+Spec built per request	The spec can never be stale	A little CPU per spec fetch; cache it if that matters to you
+4 meta-tools, not 1 per operation	Small, constant context; scales to any number of endpoints	Two extra round trips per new task (discover, then read the schema)
+In-process dispatch	No network hop, no client timeout, identical auth and logging	Nested app context needs its own DB session; fallback HTTP path to maintain
+OAuth token = personal access key	No new token store; users revoke it like any other key	No refresh or expiry semantics; revocation is manual
+operationId from function name	Unique and readable with no extra work	Function renames are breaking changes for agents
+If you want to build something similar, here’s the order we’d do it in:
+
+Put every public route under a versioned prefix behind one auth decorator. It should resolve every credential type to the same identity record.
+Move tenant authorization into that decorator, and check every place a client can supply a tenant ID. Don’t leave it to individual handlers.
+Add metadata-only doc decorators and a spec builder that walks your router. Start with summaries and request bodies; response schemas can come later.
+Write tag descriptions and docstrings for a model as the reader. Explain what the operation is for, when to use it, and what to call first.
+Expose list / details / execute as MCP tools over Streamable HTTP. Execute by re-entering your own app rather than calling it over the network.
+Add embedding search over operation summaries once you have more than a few dozen endpoints. Keep a substring fallback.
+Add OAuth (RFC 9728, 8414, 7591, PKCE) when you want the Claude and ChatGPT apps to connect. Issue tokens you already know how to validate.
+Log every JSON-RPC error explicitly. Your HTTP metrics won’t see them.
+The result is a platform where shipping a documented route makes it available to the web app, the REST API, every MCP client, and our own AI employees at once. Nothing else to register.
+
+← Back to the blog
+
+Get started free today.
+Free onboarding includes content strategy, social and blog posts, 50 leads with email outreach, and an AI agent ready to go on your website.
+
+Try for free
+→
+Book a demo
+Parallel AI Logo
+The AI agent platform for sales, marketing, and support
+
+About
+Affiliate Program
+White Label Solutions
+Custom n8n Nodes
+For Marketing Agencies
+For HighLevel Agencies
+FAQs
+About Us
+Privacy
+Privacy Policy
+Terms and Conditions
+Security
+Contact Us
+Learn
+Documentation
+API
+MCP
+Integrations
+Playbooks
+Platform Training
+Company Brain
+AI Co-Founder
+Social
+LinkedIn
+YouTube
+Facebook
+Twitter/X
+AICPA SOC for Service Organizations logo
+CSA compliance badge
+GDPR compliance
+Copyright Parallel AI 2026. All rights reserved.
+
+🇺🇸 Made in the USA
+
+
+Evelyn Brooks
+Online
+
+
+
+Book a Demo
+Hello! How can I help you today?
+
+Type your message...
+

@@ -8,15 +8,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.core import tracing
+from app.core.settings import settings
 from app.models.agent import Tool
 from app.services.llm.text import ModelCallsFailed
 
-MAX_RESULT_CHARS = 4000
 log = logging.getLogger("velma.tool")
 
 TOOL_TIMEOUTS = {  # hard cap per tool, seconds
     "outline": 600, "rewrite": 300, "check": 180, "explain_term": 120, "web_search": 70,
-    "draw": 300, "finish": 180, "read": 10,
+    "draw": 300, "finish": 180,
 }
 DEFAULT_TIMEOUT = 60
 
@@ -87,16 +88,16 @@ def _shrink(v, limit):
 
 def _fit(out) -> str:
     if isinstance(out, str):
-        return out if len(out) <= MAX_RESULT_CHARS else out[:MAX_RESULT_CHARS - 14] + "...[truncated]"
+        return out if len(out) <= settings.max_tool_result_chars else out[:settings.max_tool_result_chars - 14] + "...[truncated]"
     text = json.dumps(out, ensure_ascii=False, default=str)
-    if len(text) <= MAX_RESULT_CHARS:
+    if len(text) <= settings.max_tool_result_chars:
         return text
     out = json.loads(text)
     for _ in range(50):
-        if not _shrink(out, MAX_RESULT_CHARS):
+        if not _shrink(out, settings.max_tool_result_chars):
             break
         text = json.dumps(out, ensure_ascii=False)
-        if len(text) <= MAX_RESULT_CHARS:
+        if len(text) <= settings.max_tool_result_chars:
             return text
     return json.dumps({"ok": False, "error": "result too large"})  # many keys/items, no string left to cut
 
@@ -114,6 +115,14 @@ class Registry:
                                                   "parameters": t.parameters}} for t in self.tools.values()]
 
     def execute(self, name: str, raw_args: str, tctx: ToolContext) -> str:
+        with tracing.span(name, "TOOL", input=raw_args) as sp:
+            out = self._execute_logged(name, raw_args, tctx)
+            sp.output(out)
+            if out.startswith('{"ok": false'):
+                sp.error(out)
+            return out
+
+    def _execute_logged(self, name: str, raw_args: str, tctx: ToolContext) -> str:
         t0 = time.monotonic()
         try:
             out = self._execute(name, raw_args, tctx)

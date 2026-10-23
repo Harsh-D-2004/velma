@@ -1,8 +1,7 @@
 import time
 
-from tavily import TavilyClient
-
 from app.core.settings import settings
+from tavily import TavilyClient
 
 TIMEOUT_S = 20
 RETRY_SLEEPS_S = (1, 3)  # 2 retries

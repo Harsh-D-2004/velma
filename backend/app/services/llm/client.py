@@ -1,9 +1,8 @@
 import os
 
 import httpx
-from openai import OpenAI
-
 from app.services.llm.config import API_KEY_ENV, BASE_URL, CONNECT_TIMEOUT_S
+from openai import OpenAI
 
 
 def get(timeout_s: float = 120) -> OpenAI:

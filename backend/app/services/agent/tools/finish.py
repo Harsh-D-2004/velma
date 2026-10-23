@@ -23,16 +23,24 @@ def open_items(ws: dict, article: str) -> list[str]:
     for sid in ws["section_order"]:
         st = ws["sections"][sid]
         # no rewrite = kept as is; a rewrite, or an outline mark rewrite=true, needs a passing current check
-        if (st.get("rewritten") or st.get("rewrite")) and render.current_rewrite(ws, sid) is None:
+        if not st.get("fallback") and (st.get("rewritten") or st.get("rewrite")) and render.current_rewrite(ws, sid) is None:
             chk = st.get("check")
             items.append(f"{sid}: rewrite needs a passing check" + (
                 f" (missing {len(chk['missing'])}, unsupported {len(chk['unsupported'])}, or text changed since)" if chk else ""))
     for did, d in ws["diagrams"].items():
-        cur = render.current_rewrite(ws, d["section"])
+        st = ws["sections"][d["section"]]
+        # a diagram must match the text the page shows: the checked rewrite, or the original for a rewrite:false section
+        want = (st.get("check") or {}).get("rev") if render.current_rewrite(ws, d["section"]) else (
+            "original" if render.shows_original(st) else None)
         if d["kind"] == "svg" and not d.get("url"):
             items.append(f"{did}: diagram is not uploaded")
-        elif cur is None or d.get("rev") != ((ws["sections"][d["section"]].get("check") or {}).get("rev")):
-            items.append(f"{did}: drawn from text that is no longer the checked rewrite; draw {d['section']} again")
+        elif want is None or d.get("rev") != want:
+            items.append(f"{did}: drawn from text that is no longer the shown text; draw {d['section']} again")
+    for sid in ws["section_order"]:  # every selected section needs a diagram or a recorded draw failure
+        st = ws["sections"][sid]
+        dg = st.get("diagram") or {}
+        if dg.get("selected") and not st.get("diagram_failed") and not any(d["section"] == sid for d in ws["diagrams"].values()):
+            items.append(f"{sid}: draw a {dg['kind']} diagram ({dg['idea'][:80]})")
     return items
 
 

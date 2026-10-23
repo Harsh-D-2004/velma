@@ -5,7 +5,9 @@ import signal
 import sys
 import time
 
-from app.core import db, logs
+from openinference.instrumentation import using_session
+
+from app.core import db, logs, tracing
 from app.services import storage
 from app.services.agent import loop
 from app.services.agent.tools import sandbox
@@ -40,6 +42,19 @@ def run_one_job(job_id: str, article_key: str, worker_id: str) -> None:
     die_with_parent()
     signal.signal(signal.SIGTERM, _on_sigterm)
     logs.setup(job_id)
+    tracing.setup()
+    try:
+        with using_session(job_id), tracing.span("job", "AGENT", input=article_key,
+                                                 job_id=job_id, worker_id=worker_id) as sp:
+            reason = _run(job_id, article_key, worker_id)
+            sp.output(reason)
+            if reason == "crashed" or reason.startswith("model_calls_failed"):
+                sp.error(reason)
+    finally:
+        tracing.shutdown()
+
+
+def _run(job_id: str, article_key: str, worker_id: str) -> str:
     t0 = time.monotonic()
     ctx = scratch = snap = None
     reason = "crashed"
@@ -74,6 +89,7 @@ def run_one_job(job_id: str, article_key: str, worker_id: str) -> None:
         log.info("job_end reason=%s seconds=%.1f steps=%s tokens=%s model_calls=%s tool_calls=%s nudges=%s budget_warned=%s",
                  reason, time.monotonic() - t0, ctx.steps, ctx.tokens, ctx.model_calls, ctx.tool_calls,
                  ctx.nudges, str(ctx.warned).lower())
+        return reason
     except BaseException:  # any other failure: exit 1, the dispatcher treats it as a crash
         log.exception("job_end reason=exception seconds=%.1f", time.monotonic() - t0)
         sys.exit(1)

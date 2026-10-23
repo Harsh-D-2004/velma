@@ -4,9 +4,11 @@ services:
     env_file: .env
     environment:                    # wins over env_file: undo the host-only paths in .env
       VELMA_SCRATCH_DIR: /scratch
+      PHOENIX_COLLECTOR_ENDPOINT: http://host.docker.internal:6006
     ports:
       - "127.0.0.1:8000:8000"      # private only (no auth)
     pids_limit: 512                 # process cap for the whole container, incl. the bash sandbox
+    extra_hosts: ["host.docker.internal:host-gateway"]   # reach Phoenix on the host
     init: true                      # proper PID 1: forwards SIGTERM, reaps zombies
     stop_grace_period: 30s          # time for jobs to save context and release
     security_opt:

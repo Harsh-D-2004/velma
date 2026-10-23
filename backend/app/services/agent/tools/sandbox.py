@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import signal
@@ -8,6 +9,8 @@ from pathlib import Path
 
 from app.core.settings import settings
 from app.models.agent import Tool
+
+log = logging.getLogger("velma.bash")
 
 STREAM_CAP = 4000
 READ_CAP = 65536
@@ -72,10 +75,15 @@ def bash(args: dict, tctx) -> dict:
     proc.wait()
     for t in ts:
         t.join(1)
+    one_line = cmd.strip().replace("\n", " \\n ")[:300]
     if timed_out:
+        log.warning("bash command=%r timed_out=%ds", one_line, timeout)
         return {"ok": False, "error": f"command timed out after {timeout}s"}
     cut = lambda b: bytes(b).decode(errors="replace")[:STREAM_CAP]
     out = {"ok": proc.returncode == 0, "exit_code": proc.returncode, "stdout": cut(bufs["o"]), "stderr": cut(bufs["e"])}
+    err = out["stderr"].strip().splitlines()
+    log.log(logging.INFO if out["ok"] else logging.WARNING, "bash command=%r exit=%d stdout_chars=%d stderr=%r",
+            one_line, proc.returncode, len(bufs["o"]), err[0][:200] if err else "")
     if over.is_set():
         out["note"] = "output was cut and the command stopped: over 64 KB"
     return out

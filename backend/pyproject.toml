@@ -17,8 +17,17 @@ dependencies = [
   "boto3",
   "jinja2",
   "textstat",
+  "rank_bm25",
+  "snowballstemmer",
+  "onnxruntime",
+  "tokenizers",
   "matplotlib",
+  "arize-phoenix-otel",
+  "openinference-instrumentation-openai",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

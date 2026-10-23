@@ -7,7 +7,6 @@ from app.services.llm.budget import TokenBudget
 from app.services.llm.config import token_budget
 
 log = logging.getLogger("velma.agent")
-MAX_NUDGES = 1
 
 
 def _run_call(spec, ctx, tctx, call: dict, on_step) -> None:
@@ -55,7 +54,7 @@ def run_agent(spec, ctx, tctx, on_step) -> str:
         log.info("agent step=%d tool_calls=%d tools=%s tokens_total=%d", ctx.steps, len(res.tool_calls),
                  ",".join(c["name"] for c in res.tool_calls), ctx.tokens)
         if not res.tool_calls:
-            if ctx.nudges >= MAX_NUDGES:
+            if ctx.nudges >= settings.max_nudges:
                 log.info("agent give_up reason=no_finish nudges=%d", ctx.nudges)
                 return "no_finish"
             ctx.nudges += 1
