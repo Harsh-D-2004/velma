@@ -193,7 +193,7 @@ READ_WPM = 230  # adult silent-reading speed for the "N min read" line
 
 
 def build_page_data(ws: dict) -> dict:
-    sections, glossary, fig_no, words = [], [], 0, 0
+    sections, fig_no, words = [], 0, 0
     for sid in ws["section_order"]:
         s = ws["sections"][sid]
         rw = current_rewrite(ws, sid)
@@ -219,13 +219,11 @@ def build_page_data(ws: dict) -> dict:
             body = _html(body_of(s), br=False)  # body_of: h2 already shows the title
         notes = [{"term": g["term"], "definition": g["definition"], "source_url": g["source_url"] if str(g.get("source_url") or "").startswith(("http://", "https://")) else None}
                  for g in ws["glossary"].values() if g["section"] == sid]
-        glossary += notes
         words += _words(str(body))
         body, notes = _place_notes(_lead(str(body)), notes)
         sections.append({"id": sid, "heading": s["title"], "mode": mode, "body_html": Markup(body),
                          "visuals": visuals, "notes": notes, "fallback": bool(s.get("fallback")), "wide": any(v.get("wide") for v in visuals)})
     return {"title": ws["title"], "tldr": ws["tldr"], "sections": sections, "takeaways": ws["takeaways"],
-            "glossary": sorted(glossary, key=lambda g: g["term"].lower()),
             "minutes": max(1, round(words / READ_WPM)), "figures": fig_no}
 
 

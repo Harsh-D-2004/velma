@@ -46,7 +46,7 @@ def test_page_layout_pieces():
     assert data["sections"][1]["notes"][0]["term"] == "RBAC"  # term not in text: stays in the after-section block
     assert 'class="figure float"' in page and "Figure 1</span>How the token was forged" in page
     assert data["minutes"] == 1 and data["figures"] == 1
-    assert '<a href="#s2">Tokens</a>' in page and "<dt>JWT</dt>" in page
+    assert '<a href="#s2">Tokens</a>' in page and "Terms explained" not in page
 
 
 def test_long_code_is_folded():

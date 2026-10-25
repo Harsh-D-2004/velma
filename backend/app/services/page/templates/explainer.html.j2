@@ -89,8 +89,6 @@
     th { border-bottom:2px solid var(--line); color:var(--head); }
     blockquote { margin:0 0 1.1em; padding-left:16px; border-left:3px solid var(--line); font-style:italic; }
 
-    .glossary dt { font-weight:700; margin-top:12px; }
-    .glossary dd { margin:2px 0 0; color:var(--muted); font-size:.95rem; }
 
     /* reading progress, only where the browser has scroll-driven animations */
     .progress { display:none; }
@@ -174,18 +172,6 @@
       <h2>Key takeaways</h2>
       <div class="bookend"><ul>{% for t in takeaways %}<li>{{ t | inline }}</li>{% endfor %}</ul></div>
     </section>
-
-    {% if glossary %}
-    <section class="glossary">
-      <h2>Terms explained</h2>
-      <dl>
-        {% for g in glossary %}
-        <dt>{{ g.term }}</dt>
-        <dd>{{ g.definition | inline }}{% if g.source_url %} (<a href="{{ g.source_url }}">source</a>){% endif %}</dd>
-        {% endfor %}
-      </dl>
-    </section>
-    {% endif %}
   </article>
 </div>
 </body>
